@@ -1,0 +1,5 @@
+name: yellowpages
+version: 0.1.0
+description: Yellowpages messaging platform adapter for Hermes
+requires_env:
+  - YELLOWPAGES_TOKEN
