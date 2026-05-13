@@ -28,4 +28,5 @@ def register(ctx):
         ),
         source="plugin",
         plugin_name="yellowpages",
+        allow_all_env="YELLOWPAGES_ALLOW_ALL_USERS",
     ))

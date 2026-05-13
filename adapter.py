@@ -64,6 +64,12 @@ class YellowPagesAdapter(BasePlatformAdapter):
         return "Yellowpages"
 
     async def connect(self) -> bool:
+        # Suppress hermes' "📬 No home channel is set" notice, which fires on
+        # every new session (run.py:7423) and would otherwise leak into each
+        # human's chat with the agent — YP conversations are 1:1 per humanId,
+        # so there is no shared home channel to set. A real value in .env
+        # still wins via setdefault.
+        os.environ.setdefault("YELLOWPAGES_HOME_CHANNEL", "disabled")
         self._session = aiohttp.ClientSession(
             headers={"Authorization": f"Bearer {self._token}"},
             timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS),
