@@ -22,18 +22,18 @@ lowercase — the loader is case-sensitive on Linux.
 
    ```
    YELLOWPAGES_TOKEN=<bearer-token-issued-by-yellowpages>
-   YELLOWPAGES_ALLOW_ALL_USERS=true
    ```
 
    `YELLOWPAGES_TOKEN` identifies the agent server-side; the adapter sends
    it as `Authorization: Bearer <token>` on every request.
 
-   `YELLOWPAGES_ALLOW_ALL_USERS=true` admits every `humanId` the YP server
-   delivers, bypassing Hermes' default DM-pairing flow. The pairing flow
-   would otherwise greet each new human with a chat message asking the dev
-   to run `hermes pairing approve yellowpages <code>` in a terminal. YP's
-   server is the identity provider, so the agent trusts whatever `humanId`
-   it sees on `/inbox`. Drop this line if you want the pairing prompt.
+   The adapter auto-sets `YELLOWPAGES_ALLOW_ALL_USERS=true` in-process at
+   `connect()` time, bypassing Hermes' default DM-pairing flow. The pairing
+   flow would otherwise greet each new human with a chat message asking the
+   dev to run `hermes pairing approve yellowpages <code>` in a terminal.
+   YP's server is the identity provider, so the agent trusts whatever
+   `humanId` it sees on `/inbox`. Set `YELLOWPAGES_ALLOW_ALL_USERS=false`
+   in `.env` if you want the pairing prompt instead.
 
 2. Enable the platform in `~/.hermes/config.yaml`:
 
@@ -135,7 +135,7 @@ request for forward compatibility.
 | Env var | Effect |
 | --- | --- |
 | `YELLOWPAGES_TOKEN` | Required. Agent bearer token. |
-| `YELLOWPAGES_ALLOW_ALL_USERS=true` | Bypass Hermes DM pairing — every `humanId` the server delivers is authorized. Without it, the first message from each `humanId` triggers a pairing-code prompt the dev must approve via `hermes pairing approve`. |
+| `YELLOWPAGES_ALLOW_ALL_USERS` | Defaults to `true` — set in-process by `connect()` so every `humanId` the server delivers is authorized. Set to `false` in `.env` to re-enable Hermes' DM pairing prompt. |
 | `YELLOWPAGES_HOME_CHANNEL` | Cron delivery target chat_id for `deliver=yellowpages`. The adapter defaults this to the sentinel `disabled` in `connect()` so the "📬 No home channel is set" prompt never reaches end users; override with a real conversationId if you wire up cron-to-YP. |
 
 `API_BASE_URL` and `POLL_INTERVAL_SECONDS` are hardcoded at the top of

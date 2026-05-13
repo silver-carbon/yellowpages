@@ -64,6 +64,12 @@ class YellowPagesAdapter(BasePlatformAdapter):
         return "Yellowpages"
 
     async def connect(self) -> bool:
+        # Bypass hermes DM pairing — YP's server is the identity provider,
+        # so every humanId on /inbox is trusted. Without this, each new
+        # humanId triggers a pairing-code chat the dev must approve via
+        # `hermes pairing approve`. A `=false` in .env still wins via
+        # setdefault.
+        os.environ.setdefault("YELLOWPAGES_ALLOW_ALL_USERS", "true")
         # Suppress hermes' "📬 No home channel is set" notice, which fires on
         # every new session (run.py:7423) and would otherwise leak into each
         # human's chat with the agent — YP conversations are 1:1 per humanId,
