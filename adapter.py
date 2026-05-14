@@ -7,10 +7,10 @@ Polls ``GET {API_BASE_URL}/inbox`` every 5s. Each response item is a
 
 For each message we dispatch one ``MessageEvent`` (in parallel — one task
 per message). When the agent produces a reply, ``send()`` posts to
-``{API_BASE_URL}/message`` with ``{humanId, body, replyId}``. The API
-"currently open" — no JWT enforcement — so sender identity is not derived
-from a bearer token. ``replyId`` references the human message being
-replied to; the API requires every agent message to carry one.
+``{API_BASE_URL}/message`` with ``{humanId, body, replyId}``. Agent-side
+endpoints are bearer-authenticated and scoped to the agent identified by
+the token. ``replyId`` references the human message being replied to; the
+API requires every agent message to carry one.
 
 Deduplication is handled server-side via the ``seenByAgent`` flag — we
 trust ``/inbox`` to only return unseen messages.
@@ -20,6 +20,7 @@ import asyncio
 import datetime
 import logging
 import os
+import time
 from typing import Any, Dict, Optional
 
 import aiohttp
@@ -39,6 +40,8 @@ logger = logging.getLogger(__name__)
 API_BASE_URL = "https://kpjowqfgbvpmjzgvylbo.supabase.co/functions/v1/api"
 POLL_INTERVAL_SECONDS = 5
 REQUEST_TIMEOUT_SECONDS = 30
+TYPING_REFRESH_INTERVAL_SECONDS = 2.0
+TYPING_UNSUPPORTED_STATUSES = frozenset({404, 405, 501})
 
 
 class YellowPagesAdapter(BasePlatformAdapter):
@@ -58,6 +61,9 @@ class YellowPagesAdapter(BasePlatformAdapter):
         # invokes send() without an explicit reply_to (e.g. autonomous
         # / cron pushes). Agent messages REQUIRE a replyId.
         self._last_human_msg_by_conversation: Dict[str, int] = {}
+        # None = unprobed, True = supported, False = explicitly unsupported.
+        self._typing_supported: Optional[bool] = None
+        self._last_typing_request_at: Dict[str, float] = {}
 
     @property
     def name(self) -> str:
@@ -103,9 +109,8 @@ class YellowPagesAdapter(BasePlatformAdapter):
 
     async def _poll_loop(self) -> None:
         while True:
-            # TODO: Remove hardcoded agentId
             try:
-                async with self._session.get(f"{API_BASE_URL}/inbox?agentId=1") as resp:
+                async with self._session.get(f"{API_BASE_URL}/inbox") as resp:
                     resp.raise_for_status()
                     messages = await resp.json()
             except asyncio.CancelledError:
@@ -195,11 +200,61 @@ class YellowPagesAdapter(BasePlatformAdapter):
             async with self._session.post(f"{API_BASE_URL}/message", json=payload) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
-            return SendResult(success=True, message_id=str(data.get("id", "")))
+            message = data.get("message") if isinstance(data, dict) else None
+            message_id = ""
+            if isinstance(message, dict) and message.get("id") is not None:
+                message_id = str(message["id"])
+            return SendResult(success=True, message_id=message_id)
         except Exception as e:
             return SendResult(success=False, error=str(e), retryable=True)
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        if self._session is None or self._typing_supported is False:
+            return None
+
+        try:
+            conversation_id = int(chat_id)
+        except (TypeError, ValueError):
+            logger.debug("Yellowpages: skipping typing for invalid conversationId %r", chat_id)
+            return None
+
+        now = time.monotonic()
+        last_request_at = self._last_typing_request_at.get(chat_id)
+        if (
+            last_request_at is not None and
+            now - last_request_at < TYPING_REFRESH_INTERVAL_SECONDS
+        ):
+            return None
+        self._last_typing_request_at[chat_id] = now
+
+        try:
+            async with self._session.post(
+                f"{API_BASE_URL}/typing",
+                json={"conversationId": conversation_id},
+            ) as resp:
+                if 200 <= resp.status < 300:
+                    self._typing_supported = True
+                    return None
+                if resp.status in TYPING_UNSUPPORTED_STATUSES:
+                    self._typing_supported = False
+                    logger.info(
+                        "Yellowpages: typing endpoint unavailable (status %s); disabling typing indicators",
+                        resp.status,
+                    )
+                    return None
+                logger.debug(
+                    "Yellowpages: typing request failed with status %s for conversation %s",
+                    resp.status,
+                    conversation_id,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(
+                "Yellowpages: typing request failed for conversation %s: %s",
+                conversation_id,
+                e,
+            )
         return None
 
     async def send_image(

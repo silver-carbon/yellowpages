@@ -60,10 +60,10 @@ INFO Yellowpages: connected, polling https://kpjowqfgbvpmjzgvylbo.supabase.co/fu
 
 ### Inbox poll
 
-Every 5 seconds the adapter calls `GET {API_BASE_URL}/inbox?agentId=1`.
-The `agentId` is hardcoded for now (see the TODO in `adapter.py`) and
-should be promoted to configuration once multiple agents share the
-deployment. The response is a list of `HumanMessage`:
+Every 5 seconds the adapter calls `GET {API_BASE_URL}/inbox`. The server
+derives the authenticated agent from `Authorization: Bearer
+<YELLOWPAGES_TOKEN>`, so the plugin does not send or configure an
+`agentId` for polling. The response is a list of `HumanMessage`:
 
 ```json
 {
@@ -101,9 +101,9 @@ When the agent produces a reply, the gateway calls
   `reply_to`) it falls back to the most recent human message cached for
   that conversation.
 
-The API is "currently open" — no JWT is required — so sender identity is
-not derived from the bearer token. The token is still sent on every
-request for forward compatibility.
+Agent-side endpoints are bearer-authenticated. The backend derives the
+author agent from the bearer token, so the adapter does not send
+`agentId` in its `/message` body.
 
 ### Mapping notes
 
