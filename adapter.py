@@ -13,6 +13,7 @@ authenticated and scoped to the agent identified by ``YELLOWPAGES_TOKEN``.
 
 import asyncio
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -47,6 +48,19 @@ INBOX_BATCH_CONTINUE_THRESHOLD = 50
 TYPING_REFRESH_INTERVAL_SECONDS = 2.0
 TYPING_UNSUPPORTED_STATUSES = frozenset({404, 405, 501})
 HUMAN_MESSAGE_EVENT = "human_message"
+NON_RETRYABLE_MESSAGE_ERROR_CODES = frozenset(
+    {
+        "insufficient_usdc_balance",
+        "permit2_allowance_required",
+        "message_limit_reached",
+    }
+)
+RETRYABLE_MESSAGE_ERROR_CODES = frozenset(
+    {
+        "payment_pending",
+        "payment_transfer_failed",
+    }
+)
 
 
 class YellowPagesAdapter(BasePlatformAdapter):
@@ -606,7 +620,11 @@ class YellowPagesAdapter(BasePlatformAdapter):
         # Agent messages require a replyId pointing at a human message.
         # Prefer the gateway-supplied reply_to; fall back to the most recent
         # human message in the conversation for autonomous sends.
-        reply_id_raw = reply_to if reply_to is not None else self._last_human_msg_by_conversation.get(conv_id)
+        reply_id_raw = (
+            reply_to
+            if reply_to is not None
+            else self._last_human_msg_by_conversation.get(conv_id)
+        )
         if reply_id_raw is None:
             return SendResult(
                 success=False,
@@ -616,21 +634,57 @@ class YellowPagesAdapter(BasePlatformAdapter):
         try:
             reply_id = int(reply_id_raw)
         except (TypeError, ValueError):
-            return SendResult(success=False, error=f"Invalid reply_to {reply_to!r}", retryable=False)
-        payload = {"humanId": human_id, "body": content, "replyId": reply_id}
+            return SendResult(
+                success=False,
+                error=f"Invalid reply_to {reply_to!r}",
+                retryable=False,
+            )
+        idempotency_key = _message_idempotency_key(
+            reply_id=reply_id,
+            body=content,
+        )
+        payload = {
+            "humanId": human_id,
+            "body": content,
+            "replyId": reply_id,
+            "idempotencyKey": idempotency_key,
+        }
         try:
             async with self._session.post(
                 f"{self._api_base_url}/message",
                 headers=self._auth_headers(),
                 json=payload,
             ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-            message = data.get("message") if isinstance(data, dict) else None
-            message_id = ""
-            if isinstance(message, dict) and message.get("id") is not None:
-                message_id = str(message["id"])
-            return SendResult(success=True, message_id=message_id)
+                data = await _read_api_response(resp)
+                if resp.status < 200 or resp.status >= 300:
+                    return _message_send_error(resp.status, data)
+
+            if not isinstance(data, dict):
+                return SendResult(
+                    success=False,
+                    error=f"POST /message returned non-object payload: {data!r}",
+                    retryable=True,
+                )
+
+            message = data.get("message")
+            if not isinstance(message, dict):
+                return SendResult(
+                    success=False,
+                    error=f"POST /message response missing message object: {data!r}",
+                    retryable=True,
+                )
+
+            message_id = message.get("id")
+            if message_id is None:
+                return SendResult(
+                    success=False,
+                    error=f"POST /message response missing message.id: {data!r}",
+                    retryable=True,
+                )
+
+            return SendResult(success=True, message_id=str(message_id))
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             return SendResult(success=False, error=str(e), retryable=True)
 
@@ -710,3 +764,58 @@ def _normalize_supabase_url(value: str) -> str:
     if path.endswith(suffix):
         path = path[: -len(suffix)]
     return urlunparse((parsed.scheme, parsed.netloc, path.rstrip("/"), "", "", ""))
+
+
+async def _read_api_response(resp: aiohttp.ClientResponse) -> Any:
+    text = await resp.text()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"error": text}
+
+
+def _message_send_error(status: int, data: Any) -> SendResult:
+    if isinstance(data, dict):
+        code = data.get("code")
+        message = data.get("error") or data.get("message") or repr(data)
+    else:
+        code = None
+        message = repr(data)
+
+    code_text = str(code) if code is not None else ""
+    retryable = _message_error_retryable(status, code_text)
+    suffix = f" ({code_text})" if code_text else ""
+    return SendResult(
+        success=False,
+        error=f"POST /message failed with status {status}{suffix}: {message}",
+        retryable=retryable,
+    )
+
+
+def _message_error_retryable(status: int, code: str) -> bool:
+    if code in NON_RETRYABLE_MESSAGE_ERROR_CODES:
+        return False
+    if code in RETRYABLE_MESSAGE_ERROR_CODES:
+        return True
+    if status in {400, 401, 403, 404}:
+        return False
+    if status == 402:
+        return False
+    return (
+        status == 408
+        or status == 409
+        or status == 425
+        or status == 429
+        or status >= 500
+    )
+
+
+def _message_idempotency_key(
+    *,
+    reply_id: int,
+    body: str,
+) -> str:
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:32]
+    return f"h:{reply_id}:{digest}"
