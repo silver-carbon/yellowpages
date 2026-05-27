@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import random
-import re
 import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional, Set
@@ -61,11 +60,6 @@ RETRYABLE_MESSAGE_ERROR_CODES = frozenset(
         "payment_pending",
         "payment_transfer_failed",
     }
-)
-INTERNAL_ERROR_MESSAGE_PATTERNS = (
-    re.compile(r"\bnonetype\b.*\bobject\b.*\bnot iterable\b", re.IGNORECASE),
-    re.compile(r"\bobject is not iterable\b", re.IGNORECASE),
-    re.compile(r"\btraceback \(most recent call last\):", re.IGNORECASE),
 )
 
 
@@ -615,25 +609,6 @@ class YellowPagesAdapter(BasePlatformAdapter):
     ) -> SendResult:
         if self._session is None:
             return SendResult(success=False, error="Not connected", retryable=True)
-        outbound_content = "" if content is None else str(content).strip()
-        if not outbound_content:
-            return SendResult(
-                success=False,
-                error="Refusing to send empty Yellowpages message",
-                retryable=False,
-            )
-        if _looks_like_internal_error_message(outbound_content):
-            logger.error(
-                "Yellowpages: refusing to send internal error text to chat %s: %r",
-                chat_id,
-                outbound_content,
-            )
-            return SendResult(
-                success=False,
-                error=f"Refusing to send internal error text: {outbound_content}",
-                retryable=False,
-            )
-
         conv_id = str(chat_id)
         human_id = self._human_by_conversation.get(conv_id)
         if human_id is None:
@@ -666,11 +641,11 @@ class YellowPagesAdapter(BasePlatformAdapter):
             )
         idempotency_key = _message_idempotency_key(
             reply_id=reply_id,
-            body=outbound_content,
+            body=content,
         )
         payload = {
             "humanId": human_id,
-            "body": outbound_content,
+            "body": content,
             "replyId": reply_id,
             "idempotencyKey": idempotency_key,
         }
@@ -844,7 +819,3 @@ def _message_idempotency_key(
 ) -> str:
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:32]
     return f"h:{reply_id}:{digest}"
-
-
-def _looks_like_internal_error_message(content: str) -> bool:
-    return any(pattern.search(content) for pattern in INTERNAL_ERROR_MESSAGE_PATTERNS)
