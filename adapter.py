@@ -48,6 +48,63 @@ TYPING_REFRESH_INTERVAL_SECONDS = 2.0
 TYPING_UNSUPPORTED_STATUSES = frozenset({404, 405, 501})
 HUMAN_MESSAGE_EVENT = "human_message"
 
+# ---------------------------------------------------------------------------
+# Backend control-plane message filtering
+#
+# Yellowpages agents are exposed to *paying end users*. The only thing a
+# consumer should ever see is the agent's in-persona reply. Hermes, however,
+# emits a number of operator-facing "control-plane" messages over the same
+# send() path — progress tickers, dangerous-command approval prompts, DM
+# pairing codes, the "no home channel" notice. The adapter is the last choke
+# point before the consumer, so we drop these here. Because this lives in the
+# plugin, the guarantee holds for *every* Yellowpages agent regardless of how
+# its deployment configures display/approvals.
+#
+# This is the enforced floor, NOT a substitute for configuring the source:
+#   - display.platforms.yellowpages.tool_progress: off  (stop progress at source)
+#   - approvals.mode: off / HERMES_YOLO_MODE / a sandboxed terminal backend
+#     (so the agent never *blocks* on an approval the consumer can't answer)
+# Without the latter, a suppressed approval prompt still leaves the agent
+# thread waiting until the approval timeout — invisible to the consumer, but
+# slow. Suppression keeps it out of the chat; the deploy config keeps it fast.
+#
+# Markers are intentionally structural (leading status glyph, /approve+/deny
+# co-occurrence, distinctive phrases) rather than exact strings, so they
+# survive hermes wording changes across versions.
+
+# Leading glyphs hermes uses to prefix progress / inactivity status tickers.
+_STATUS_PREFIX_GLYPHS = ("⏳", "⏱")  # ⏳ hourglass, ⏱ stopwatch
+
+# Case-insensitive substrings that mark an operator-facing control message.
+_BACKEND_MARKERS = (
+    "requires approval",
+    "potentially dangerous",
+    "pairing code",
+    "no home channel is set",
+)
+
+
+def is_backend_chatter(content: str) -> bool:
+    """Return True if *content* is a hermes control-plane message.
+
+    Such messages (progress tickers, approval prompts, pairing codes, home
+    channel notices) are operator-facing and must never reach a Yellowpages
+    consumer — only the agent's in-persona reply should. Returns False for
+    normal agent replies, which are forwarded unchanged.
+    """
+    if not content or not content.strip():
+        return False
+    if content.lstrip().startswith(_STATUS_PREFIX_GLYPHS):
+        return True
+    lowered = content.lower()
+    if any(marker in lowered for marker in _BACKEND_MARKERS):
+        return True
+    # Dangerous-command approval prompt: both /approve and /deny instructions
+    # appear together. An in-persona reply would never emit that pair.
+    if "/approve" in lowered and "/deny" in lowered:
+        return True
+    return False
+
 
 class YellowPagesAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig, **_: Any) -> None:
@@ -593,6 +650,15 @@ class YellowPagesAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
+        # Drop hermes control-plane messages before they reach the consumer.
+        # Report success so the gateway treats it as delivered (no retry / no
+        # plain-text fallback) — we are intentionally consuming it.
+        if is_backend_chatter(content):
+            logger.debug(
+                "Yellowpages: suppressed backend control-plane message: %.120r",
+                content,
+            )
+            return SendResult(success=True, message_id="")
         if self._session is None:
             return SendResult(success=False, error="Not connected", retryable=True)
         conv_id = str(chat_id)

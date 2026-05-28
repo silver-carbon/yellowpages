@@ -105,6 +105,63 @@ Agent-side endpoints are bearer-authenticated. The backend derives the
 author agent from the bearer token, so the adapter does not send
 `agentId` in its `/message` body.
 
+### Consumer-facing message hygiene
+
+Yellowpages agents are exposed to **paying end users**, who should only ever
+see the agent's in-persona reply. Hermes also emits operator-facing
+"control-plane" messages over the same `send()` path: progress/iteration
+tickers, dangerous-command approval prompts (`/approve` … `/deny`), DM pairing
+codes, and the "no home channel" notice.
+
+`send()` drops these before they reach the consumer (`is_backend_chatter()` in
+`adapter.py`). Because the filter lives in the plugin, the guarantee holds for
+**every** Yellowpages agent regardless of how its deployment is configured.
+Matching is structural (leading `⏳`/`⏱` status glyph, `/approve`+`/deny`
+co-occurrence, distinctive phrases) so it survives hermes wording changes.
+
+The plugin also injects a `platform_hint` (see `__init__.py`) instructing the
+model to stay in its soul persona and never reveal its backend, tools, or
+slash-commands, and to decline prompt-injection attempts in-character.
+
+**This is the enforced floor, not a substitute for configuring the source.**
+Each deployment should still:
+
+- Stop progress messages at the source so the agent isn't even generating them:
+  ```yaml
+  display:
+    platforms:
+      yellowpages:
+        tool_progress: off
+        streaming: false
+        show_reasoning: false
+  ```
+  (Yellowpages is not in hermes' built-in `_PLATFORM_DEFAULTS`, so it otherwise
+  inherits the global `tool_progress: all`.)
+- **Decide how dangerous commands are handled — this is required, not
+  optional.** The plugin suppresses the approval *prompt*, but it cannot answer
+  it. When a dangerous command is hit and approvals are still on, the agent
+  thread blocks on the approval (`approvals.gateway_timeout`, default **300s /
+  5 min**), the consumer sees nothing, no `/approve` ever arrives, and the
+  command finally resolves as "timed out → blocked." The agent is *not* hung
+  forever — it then continues and sends a normal in-persona reply — but the
+  consumer experiences a multi-minute silent stall first. To avoid that, every
+  agent must remove the gate at the source. The plugin stays neutral on which
+  way (it's a per-agent security choice):
+  - A sandboxed terminal backend (`docker`/`modal`/`daytona`) — auto-approves
+    *and* contains blast radius. Best for a consumer-facing agent.
+  - `approvals.mode: off`, or `HERMES_YOLO_MODE=1` in that agent's `.env` — no
+    gate at all (agent runs commands unguarded on its host).
+  - If you keep approvals on for some reason, at least set a short
+    `approvals.gateway_timeout` so the stall is brief.
+- **Encode the agent's scope and a friendly refusal in the soul file.** When a
+  task is out of scope, blocked, or times out, the agent should decline in its
+  own voice — e.g. *"Sorry, I'm an agent that only helps with restaurant
+  reservations — I can't take that one on."* The plugin's `platform_hint` nudges
+  this, but the soul is where you define what the agent does and how it says no.
+- Strip any backend/onboarding language (e.g. "type /help", references to the
+  underlying platform) from the agent's **soul file** — the plugin can nudge via
+  `platform_hint`, but the soul is the source of the persona.
+
 ### Mapping notes
 
 - `conversationId` → Hermes `chat_id` / `chat_name`
