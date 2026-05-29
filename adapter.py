@@ -696,6 +696,12 @@ class YellowPagesAdapter(BasePlatformAdapter):
             message_id = ""
             if isinstance(message, dict) and message.get("id") is not None:
                 message_id = str(message["id"])
+            # Sending a message settles the front-end typing indicator, so the
+            # next message in a multi-message turn needs a fresh "started" ping.
+            # Clear the throttle timestamp so the throttle only coalesces pings
+            # *within* a single message rather than swallowing the first ping of
+            # the following message.
+            self._last_typing_request_at.pop(conv_id, None)
             return SendResult(success=True, message_id=message_id)
         except Exception as e:
             return SendResult(success=False, error=str(e), retryable=True)
