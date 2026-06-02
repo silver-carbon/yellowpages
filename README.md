@@ -111,13 +111,15 @@ Yellowpages agents are exposed to **paying end users**, who should only ever
 see the agent's in-persona reply. Hermes also emits operator-facing
 "control-plane" messages over the same `send()` path: progress/iteration
 tickers, dangerous-command approval prompts (`/approve` … `/deny`), DM pairing
-codes, and the "no home channel" notice.
+codes, session reset banners, and the "no home channel" notice.
 
-`send()` drops these before they reach the consumer (`is_backend_chatter()` in
-`adapter.py`). Because the filter lives in the plugin, the guarantee holds for
-**every** Yellowpages agent regardless of how its deployment is configured.
-Matching is structural (leading `⏳`/`⏱` status glyph, `/approve`+`/deny`
-co-occurrence, distinctive phrases) so it survives hermes wording changes.
+`send()` drops or normalizes these before they reach the consumer
+(`normalize_outgoing_content()` in `adapter.py`). Reset banners are rewritten
+to `Conversation reset!`; other backend chatter is suppressed. Because the
+filter lives in the plugin, the guarantee holds for **every** Yellowpages agent
+regardless of how its deployment is configured. Matching is structural (leading
+`⏳`/`⏱` status glyph, `/approve`+`/deny` co-occurrence, reset headings with
+metadata labels, distinctive phrases) so it survives hermes wording changes.
 
 The plugin also injects a `platform_hint` (see `__init__.py`) instructing the
 model to stay in its soul persona and never reveal its backend, tools, or

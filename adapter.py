@@ -83,6 +83,8 @@ _BACKEND_MARKERS = (
     "no home channel is set",
 )
 
+CONVERSATION_RESET_MESSAGE = "Conversation reset!"
+
 
 def is_backend_chatter(content: str) -> bool:
     """Return True if *content* is a hermes control-plane message.
@@ -104,6 +106,37 @@ def is_backend_chatter(content: str) -> bool:
     if "/approve" in lowered and "/deny" in lowered:
         return True
     return False
+
+
+def is_session_reset_notice(content: str) -> bool:
+    """Return True for hermes session-reset banners with backend metadata."""
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    first_line = lines[0].lower()
+    if "session reset" not in first_line and "conversation reset" not in first_line:
+        return False
+    if "starting fresh" in first_line:
+        return True
+
+    lowered_lines = [line.lower() for line in lines[1:]]
+    metadata_markers = ("model:", "provider:", "context:", "tip:")
+    marker_hits = sum(
+        1
+        for line in lowered_lines
+        if any(marker in line for marker in metadata_markers)
+    )
+    return marker_hits >= 2
+
+
+def normalize_outgoing_content(content: str) -> Optional[str]:
+    """Normalize or suppress backend-generated messages before delivery."""
+    if is_session_reset_notice(content):
+        return CONVERSATION_RESET_MESSAGE
+    if is_backend_chatter(content):
+        return None
+    return content
 
 
 class YellowPagesAdapter(BasePlatformAdapter):
@@ -650,15 +683,23 @@ class YellowPagesAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        # Drop hermes control-plane messages before they reach the consumer.
-        # Report success so the gateway treats it as delivered (no retry / no
-        # plain-text fallback) — we are intentionally consuming it.
-        if is_backend_chatter(content):
+        # Normalize/drop hermes control-plane messages before they reach the
+        # consumer. Report success on suppression so the gateway treats it as
+        # delivered (no retry / no plain-text fallback) - we intentionally
+        # consume it.
+        normalized_content = normalize_outgoing_content(content)
+        if normalized_content is None:
             logger.debug(
                 "Yellowpages: suppressed backend control-plane message: %.120r",
                 content,
             )
             return SendResult(success=True, message_id="")
+        if normalized_content != content:
+            logger.debug(
+                "Yellowpages: normalized backend-generated message: %.120r",
+                content,
+            )
+            content = normalized_content
         if self._session is None:
             return SendResult(success=False, error="Not connected", retryable=True)
         conv_id = str(chat_id)
